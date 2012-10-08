@@ -1,0 +1,394 @@
+diff -ur pam-pkcs11-0.6.7/src/common/pkcs11_lib.c pam-pkcs11-0.6.7/src/common/pkcs11_lib.c
+--- pam-pkcs11-0.6.7/src/common/pkcs11_lib.c	2011-07-09 14:20:48.000000000 +0200
++++ pam-pkcs11-0.6.7/src/common/pkcs11_lib.c	2012-10-02 14:45:55.536353441 +0200
+@@ -623,7 +622,12 @@
+   }
+ }
+ 
+-int open_pkcs11_session(pkcs11_handle_t *h, unsigned int slot_num)
++int open_pkcs11_session(pkcs11_handle_t *h, unsigned int slot)
++{
++  return open_pkcs11_session_t(h, slot, 0);
++}
++
++int open_pkcs11_session_t(pkcs11_handle_t *h, unsigned int slot_num, int flags)
+ {
+   /* NSS manages the sessions under the covers, use this function to
+    * select a slot */
+@@ -710,7 +714,9 @@
+   return PK11_GetTokenName(h->slot);
+ }
+ 
+-
++int change_pin(pkcs11_handle_t *h, char *old_pin, char *new_pin) {
++   return 1;
++}
+ 
+ cert_object_t **get_certificate_list(pkcs11_handle_t *h, int *count)
+ {
+@@ -1359,6 +1365,11 @@
+ 
+ int open_pkcs11_session(pkcs11_handle_t *h, unsigned int slot)
+ {
++  return open_pkcs11_session_t(h, slot, CKF_SERIAL_SESSION);
++}
++
++int open_pkcs11_session_t(pkcs11_handle_t *h, unsigned int slot, int flags)
++{
+   int rv;
+ 
+   DBG1("opening a new PKCS #11 session for slot %d", slot + 1);
+@@ -1367,7 +1378,7 @@
+     return -1;
+   }
+   /* open a readonly user-session */
+-  rv = h->fl->C_OpenSession(h->slots[slot].id, CKF_SERIAL_SESSION, NULL, NULL, &h->session);
++  rv = h->fl->C_OpenSession(h->slots[slot].id, flags, NULL, NULL, &h->session);
+   if (rv != CKR_OK) {
+     set_error("C_OpenSession() failed: 0x%08lX", rv);
+     return -1;
+@@ -1418,6 +1429,14 @@
+   return tinfo.flags & CKF_PROTECTED_AUTHENTICATION_PATH;
+ }
+ 
++int change_pin(pkcs11_handle_t *h, char *old_pin, char  *new_pin) {
++   int rv;
++   rv = h->fl->C_SetPIN(h->session,
++                (CK_UTF8CHAR *) old_pin, old_pin == NULL ? 0 : strlen(old_pin),
++                (CK_UTF8CHAR *) new_pin, new_pin == NULL ? 0 : strlen(new_pin));
++   return rv;
++}
++
+ static void free_certs(cert_object_t **certs, int cert_count)
+ {
+   int i;
+diff -ur pam-pkcs11-0.6.7/src/common/pkcs11_lib.h pam-pkcs11-0.6.7/src/common/pkcs11_lib.h
+--- pam-pkcs11-0.6.7/src/common/pkcs11_lib.h	2010-10-23 20:36:36.000000000 +0200
++++ pam-pkcs11-0.6.7/src/common/pkcs11_lib.h	2012-10-02 14:22:00.018516021 +0200
+@@ -54,6 +54,7 @@
+                                  unsigned int *slot);
+ PKCS11_EXTERN const X509 *get_X509_certificate(cert_object_t *cert);
+ PKCS11_EXTERN void release_pkcs11_module(pkcs11_handle_t *h);
++PKCS11_EXTERN int open_pkcs11_session_t(pkcs11_handle_t *h, unsigned int slot, int flags);
+ PKCS11_EXTERN int open_pkcs11_session(pkcs11_handle_t *h, unsigned int slot);
+ PKCS11_EXTERN int close_pkcs11_session(pkcs11_handle_t *h);
+ PKCS11_EXTERN int pkcs11_login(pkcs11_handle_t *h, char *password);
+@@ -63,6 +64,7 @@
+ PKCS11_EXTERN cert_object_t **get_certificate_list(pkcs11_handle_t *h,
+                                                   int *ncert);
+ PKCS11_EXTERN int get_private_key(pkcs11_handle_t *h, cert_object_t *);
++PKCS11_EXTERN int change_pin(pkcs11_handle_t *h, char *old_pin, char *new_pin);
+ PKCS11_EXTERN int sign_value(pkcs11_handle_t *h, cert_object_t *,
+                unsigned char *data, unsigned long length,
+                unsigned char **signature, unsigned long *signature_length);
+diff -ur pam-pkcs11-0.6.7/src/pam_pkcs11/pam_config.c pam-pkcs11-0.6.7/src/pam_pkcs11/pam_config.c
+--- pam-pkcs11-0.6.7/src/pam_pkcs11/pam_config.c	2011-07-09 14:20:48.000000000 +0200
++++ pam-pkcs11-0.6.7/src/pam_pkcs11/pam_config.c	2012-10-02 13:01:05.717835593 +0200
+@@ -63,6 +63,7 @@
+ 		OCSP_NONE
+ 	},
+ 	N_("Smart card"),			/* token_type */
++	N_("PIN"),				/* prompt string*/
+ 	NULL,				/* char *username */
+ 	0,                               /* int quiet */
+ 	0			/* err_display_time */
+@@ -207,6 +208,8 @@
+ 
+ 		configuration.token_type = (char *)
+ 			scconf_get_str(pkcs11_mblk,"token_type",configuration.token_type);
++		configuration.prompt_string = (char *)
++			scconf_get_str(pkcs11_mblk,"prompt_string",configuration.prompt_string);
+ 	}
+ 	screen_saver_list = scconf_find_list(root,"screen_savers");
+ 	if (screen_saver_list) {
+@@ -351,6 +354,11 @@
+ 		continue;
+ 	   }
+ 
++           if (strstr(argv[i],"prompt_string=") ) {
++                configuration.prompt_string = argv[i] + sizeof("prompt_string=")-1;
++                continue;
++           }
++
+ 	   if (strstr(argv[i],"config_file=") ) {
+ 		/* already parsed, skip */
+ 		continue;
+diff -ur pam-pkcs11-0.6.7/src/pam_pkcs11/pam_config.h pam-pkcs11-0.6.7/src/pam_pkcs11/pam_config.h
+--- pam-pkcs11-0.6.7/src/pam_pkcs11/pam_config.h	2011-07-09 14:20:48.000000000 +0200
++++ pam-pkcs11-0.6.7/src/pam_pkcs11/pam_config.h	2012-10-02 13:01:05.721835460 +0200
+@@ -43,6 +43,7 @@
+ 	int support_threads;
+ 	cert_policy policy;
+ 	const char *token_type;
++	const char *prompt_string;
+ 	const char *username; /* provided user name */
+ 	int quiet;
+ 	int err_display_time;
+diff -ur pam-pkcs11-0.6.7/src/pam_pkcs11/pam_pkcs11.c pam-pkcs11-0.6.7/src/pam_pkcs11/pam_pkcs11.c
+--- pam-pkcs11-0.6.7/src/pam_pkcs11/pam_pkcs11.c	2011-08-06 15:25:34.000000000 +0200
++++ pam-pkcs11-0.6.7/src/pam_pkcs11/pam_pkcs11.c	2012-10-02 14:44:26.600485690 +0200
+@@ -43,6 +43,9 @@
+ #include "../common/cert_st.h"
+ #include "pam_config.h"
+ #include "mapper_mgr.h"
++//TODO: should better be included 
++#define CKF_RW_SESSION          0x00000002      /* session is r/w */
++#define CKF_SERIAL_SESSION      0x00000004 
+ 
+ #ifdef ENABLE_NLS
+ #include <libintl.h>
+@@ -865,18 +867,247 @@
+ 
+ PAM_EXTERN int pam_sm_chauthtok(pam_handle_t *pamh, int flags, int argc, const char **argv)
+ {
++  char old_buf[21], *old_pin = NULL;
++  char new_buf[21], *new_pin = NULL;
+   char *login_token_name;
++  int i, rv;
++  char *password;
++  char password_prompt[128];
++  char message[512];
++  unsigned int slot_num = 0;
++  struct configuration_st *configuration;
++  int pkcs11_pam_fail = PAM_AUTHINFO_UNAVAIL;
++  pkcs11_handle_t *ph = NULL;
++  
++  /* enable debug ? */
++  for (i = 0; i < argc; i++)
++    if (strcmp("debug", argv[i]) == 0) {
++      set_debug_level(1);
++    }
+ 
+-  ERR("Warning: Function pam_sm_chauthtok() is not implemented in this module");
+-  pam_syslog(pamh, LOG_WARNING,
+-             "Function pam_sm_chauthtok() is not implemented in this module");
++  /* copied from pam_sm_authenticate */
++  /* call configure routines */
++  configuration = pk_configure(argc,argv);
++  if (!configuration ) {
++        ERR("Error setting configuration parameters");
++        return PAM_AUTHINFO_UNAVAIL;
++  }
++
++  /* Either slot_description or slot_num, but not both, needs to be used */
++  if ((configuration->slot_description != NULL && configuration->slot_num != -1) || (configuration->slot_description == NULL && configuration->slot_num == -1)) {
++        ERR("Error setting configuration parameters");
++        return PAM_AUTHINFO_UNAVAIL;
++  }
++
++  /* fail if we are using a remote server
++   * local login: DISPLAY=:0
++   * XDMCP login: DISPLAY=host:0 */
++  {
++          char *display = getenv("DISPLAY");
+ 
++          if (display)
++          {
++                  if (strncmp(display, "localhost:", 10) != 0 && (display[0] != ':')
++                          && (display[0] != '\0')) {
++                          ERR1("Remote login (from %s) is not (yet) supported", display);
++                          pam_syslog(pamh, LOG_ERR,
++                                  "Remote login (from %s) is not (yet) supported", display);
++                          return PAM_AUTHINFO_UNAVAIL;
++                  }
++          }
++  }
++#ifdef ENABLE_NLS
++  setlocale(LC_ALL, "");
++  bindtextdomain(PACKAGE, "/usr/share/locale");
++  textdomain(PACKAGE);
++#endif
+   login_token_name = getenv("PKCS11_LOGIN_TOKEN_NAME");
+-  if (login_token_name && (flags & PAM_PRELIM_CHECK)) {
+-    pam_prompt(pamh, PAM_TEXT_INFO, NULL,
+-               _("Cannot change the password on your smart card."));
++
++  /* load pkcs #11 module */
++  DBG("loading pkcs #11 module...");
++  rv = load_pkcs11_module(configuration->pkcs11_modulepath, &ph);
++  if (rv != 0) {
++    ERR2("load_pkcs11_module() failed loading %s: %s",
++                configuration->pkcs11_modulepath, get_error());
++    if (!configuration->quiet) {
++                pam_syslog(pamh, LOG_ERR, "load_pkcs11_module() failed loading %s: %s",
++                        configuration->pkcs11_modulepath, get_error());
++                snprintf(password_prompt, sizeof(password_prompt), _("Error 2302: PKCS#11 module failed loading"));
++                pam_prompt(pamh, PAM_ERROR_MSG , NULL, password_prompt);
++                sleep(configuration->err_display_time);
++        }
++    return PAM_AUTHINFO_UNAVAIL;
+   }
+-  return PAM_SERVICE_ERR;
++  /* initialise pkcs #11 module */
++  DBG("initialising pkcs #11 module...");
++  rv = init_pkcs11_module(ph,configuration->support_threads);
++  if (rv != 0) {
++    release_pkcs11_module(ph);
++    ERR1("init_pkcs11_module() failed: %s", get_error());
++    if (!configuration->quiet) {
++                pam_syslog(pamh, LOG_ERR, "init_pkcs11_module() failed: %s", get_error());
++                snprintf(password_prompt, sizeof(password_prompt), _("Error 2304: PKCS#11 module could not be initialized"));
++                pam_prompt(pamh, PAM_ERROR_MSG , NULL, password_prompt);
++                sleep(configuration->err_display_time);
++        }
++    return PAM_AUTHINFO_UNAVAIL;
++  }
++  /* open pkcs #11 session */
++  if (configuration->slot_description != NULL) {
++    rv = find_slot_by_slotlabel_and_tokenlabel(ph, configuration->slot_description, login_token_name, &slot_num);
++  } else if (configuration->slot_num != -1) {
++    rv = find_slot_by_number_and_label(ph, configuration->slot_num, login_token_name, &slot_num);
++  }
++  if (rv != 0) {
++    ERR("no suitable token available");
++    if (!configuration->quiet) {
++       pam_syslog(pamh, LOG_ERR, "no suitable token available");
++       snprintf(password_prompt, sizeof(password_prompt), _("Error 2306: No suitable token available"));
++       pam_prompt(pamh, PAM_ERROR_MSG , NULL, password_prompt);
++       sleep(configuration->err_display_time);
++    }
++    /* we must have a smart card, either because we've configured it as such,
++     * or because we used one to log in */
++    if (login_token_name || configuration->wait_for_card) {
++      if (login_token_name) {
++        snprintf(password_prompt, sizeof(password_prompt),_("Please insert your smart card called \"%.32s\"."),login_token_name);
++        pam_prompt(pamh, PAM_TEXT_INFO, NULL, password_prompt);
++      } else {
++        pam_prompt(pamh, PAM_TEXT_INFO, NULL,_("Please insert your smart card."));
++      }
++
++      if (configuration->slot_description != NULL) {
++        rv = wait_for_token_by_slotlabel(ph, configuration->slot_description, login_token_name, &slot_num);
++      } else if (configuration->slot_num != -1) {
++        rv = wait_for_token(ph, configuration->slot_num, login_token_name, &slot_num);
++      }
++      if (rv != 0) {
++        release_pkcs11_module(ph);
++        return pkcs11_pam_fail;
++      }
++    }
++  } else {
++      snprintf(password_prompt, sizeof(password_prompt),
++                  _("%s found."), _(configuration->token_type));
++      pam_prompt(pamh, PAM_TEXT_INFO, NULL, password_prompt);
++  }
++  rv = open_pkcs11_session_t(ph, slot_num, CKF_RW_SESSION|CKF_SERIAL_SESSION);
++  if (rv != 0) {
++    ERR1("open_pkcs11_session() failed: %s", get_error());
++    if (!configuration->quiet) {
++      pam_syslog(pamh, LOG_ERR, "open_pkcs11_session() failed: %s", get_error());
++      snprintf(password_prompt, sizeof(password_prompt), _("Error 2312: open PKCS#11 session failed"));
++      pam_prompt(pamh, PAM_ERROR_MSG , NULL, password_prompt);
++      sleep(configuration->err_display_time);
++    }
++    release_pkcs11_module(ph);
++    return pkcs11_pam_fail;
++  }
++  if (flags & PAM_PRELIM_CHECK) {
++    return PAM_SUCCESS;
++  }
++  snprintf(password_prompt, sizeof(password_prompt), _("%s %s: "), (configuration->token_type), (configuration->prompt_string));
++  if (configuration->use_first_pass) {
++    rv = pam_get_pwd(pamh, &old_pin, NULL, PAM_AUTHTOK, 0);
++  } else if (configuration->try_first_pass) {
++    rv = pam_get_pwd(pamh, &old_pin, password_prompt, PAM_AUTHTOK, PAM_AUTHTOK);
++  } else {
++    rv = pam_get_pwd(pamh, &old_pin, password_prompt, 0, PAM_AUTHTOK);
++  }
++  if (rv != PAM_SUCCESS) {
++    if (!configuration->quiet) {
++      snprintf(password_prompt, sizeof(password_prompt), _("Error 2316: password could not be read"));
++      pam_prompt(pamh, PAM_ERROR_MSG, NULL, password_prompt);
++      sleep(configuration->err_display_time);
++    }
++    pam_syslog(pamh, LOG_ERR, "pam_get_pwd() failed: %s", pam_strerror(pamh, rv));
++    return pkcs11_pam_fail;
++  }
++  rv = pkcs11_login(ph, old_pin);
++  if (rv == 0) {
++    DBG("Success!");
++  } else {
++    DBG("Failed");
++    return PAM_AUTH_ERR;
++  }
++  if (!get_slot_protected_authentication_path(ph)) {
++    rv = pam_get_pwd(pamh, &old_pin, NULL, PAM_AUTHTOK, 0);
++    if (rv == PAM_SUCCESS) {
++      strcpy(old_buf, old_pin);
++      old_pin = old_buf;
++      DBG("get old pwd ok");
++    } else {
++      DBG("get old pwd failed!");
++      return PAM_AUTH_ERR;
++    }
++    snprintf(password_prompt, sizeof(password_prompt), _("New %s %s: "), (configuration->token_type), (configuration->prompt_string));
++    rv = pam_get_pwd(pamh, &new_pin, password_prompt, 0, PAM_AUTHTOK);
++    if (rv != PAM_SUCCESS) {
++      if (!configuration->quiet) {
++        snprintf(password_prompt, sizeof(password_prompt), _("Error 2316: password could not be read"));
++        pam_prompt(pamh, PAM_ERROR_MSG, NULL, password_prompt);
++        sleep(configuration->err_display_time);
++      }
++      pam_syslog(pamh, LOG_ERR, "pam_get_pwd() new password failed: %s", pam_strerror(pamh, rv));
++      return pkcs11_pam_fail;
++    }
++    strcpy(new_buf, new_pin);
++    snprintf(password_prompt, sizeof(password_prompt), _("Please retype new %s %s: "), (configuration->token_type), (configuration->prompt_string));
++    rv = pam_get_pwd(pamh, &new_pin, password_prompt, 0, PAM_AUTHTOK);
++    if (rv != PAM_SUCCESS) {
++      if (!configuration->quiet) {
++        snprintf(password_prompt, sizeof(password_prompt), _("Error 2316: password could not be read"));
++        pam_prompt(pamh, PAM_ERROR_MSG, NULL, password_prompt);
++        sleep(configuration->err_display_time);
++      }
++      pam_syslog(pamh, LOG_ERR, "pam_get_pwd() new password failed: %s", pam_strerror(pamh, rv));
++      return pkcs11_pam_fail;
++    }
++
++    /* compare pins */
++    if (strcmp(new_buf, new_pin) != 0) {
++      if (!configuration->quiet) {
++        snprintf(password_prompt, sizeof(password_prompt), _("Error: passwords are different"));
++        pam_prompt(pamh, PAM_ERROR_MSG, NULL, password_prompt);
++        sleep(configuration->err_display_time);
++      }
++      pam_syslog(pamh, LOG_ERR, "passwords are different");
++      return PAM_AUTHTOK_ERR;
++    }
++  }
++  rv = change_pin(ph, old_pin, new_pin);
++  if (rv != PAM_SUCCESS) {
++    snprintf(password_prompt, sizeof(password_prompt), _("Error 2346: changing %s %s failed"), (configuration->token_type), (configuration->prompt_string));
++    pam_prompt(pamh, PAM_ERROR_MSG , NULL, password_prompt);
++    sleep(configuration->err_display_time);
++  } else {
++    snprintf(password_prompt, sizeof(password_prompt), _("%s %s successfully changed"), (configuration->token_type), (configuration->prompt_string));
++    pam_prompt(pamh, PAM_ERROR_MSG , NULL, password_prompt);
++    sleep(configuration->err_display_time);
++  }
++  /* close pkcs #11 session */
++  rv = close_pkcs11_session(ph);
++  if (rv != 0) {
++    release_pkcs11_module(ph);
++    ERR1("close_pkcs11_session() failed: %s", get_error());
++    if (!configuration->quiet) {
++      pam_syslog(pamh, LOG_ERR, "close_pkcs11_module() failed: %s", get_error());
++      snprintf(password_prompt, sizeof(password_prompt), _("Error 2344: Closing PKCS#11 session failed"));
++      pam_prompt(pamh, PAM_ERROR_MSG , NULL, password_prompt);
++      sleep(configuration->err_display_time);
++    }
++    return pkcs11_pam_fail;
++  }
++
++  /* release pkcs #11 module */
++  DBG("releasing pkcs #11 module...");
++  release_pkcs11_module(ph);
++
++  /* quick and dirty fail exit point */
++  free(password); /* erase and free in-memory password data */
++  memset(password, 0, strlen(password));
++
++  return PAM_SUCCESS;
+ }
+ 
+ #ifdef PAM_STATIC
